@@ -1,2 +1,2 @@
-# DRTrajWeaver
-DRTrajWeaver, Trajectory Recovery with DDPM
+# TrajWeaver
+TrajWeaver, Trajectory Recovery with DDPM

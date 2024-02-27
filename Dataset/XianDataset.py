@@ -20,7 +20,7 @@ class XianTrajectoryDataset(data.Dataset):
     def __init__(self, dataset_root: str, traj_length: int, feature_mean: List[float], feature_std: List[float],
                  city_cells: int = 256):
         """
-        滴滴 Trajectory Dataset 西安 datasets
+        Didi Trajectory Dataset Xi'an datasets
 
         The processed dataset folder contains many gps_YYYYMMDD.pt files
         They record trajectories of all orders in that day, formatted as:
@@ -33,6 +33,10 @@ class XianTrajectoryDataset(data.Dataset):
 
         lon_lat_tensor: (N, 2) torch.float64
         time_tensor: (N,) torch.long
+
+        Otherwise, if only cache is available
+        Set dataset_root to "nov" so that the class correctly recognizes the time
+        Then use loadCache() to load the cache
 
         :param dataset_root: The path to the folder containing gps_YYYYMMDD.pt files
         :param traj_length: shorter: not included, longer: included but cropped
@@ -65,7 +69,12 @@ class XianTrajectoryDataset(data.Dataset):
         self.city_cell_boundaries = self.__getGaussianSegments(city_cells)
 
 
-    def resetSampleLength(self, length: int):
+    def resetSampleLength(self, length: int) -> None:
+        """
+        Reset the sample length of trajectory
+        :param length: the new sample length
+        :return: None
+        """
         if length > self.traj_length:
             length = self.traj_length
         elif length < 1:
@@ -73,17 +82,26 @@ class XianTrajectoryDataset(data.Dataset):
         self.sample_length = length
 
 
-    def resetEraseRate(self, elim_rate: float):
+    def resetEraseRate(self, elim_rate: float) -> None:
+        """
+        Reset the erase rate of trajectory
+        :param elim_rate: The percentage of points to be erased
+        :return: None
+        """
         self.erase_rate = min(1.0, max(0.0, elim_rate))
 
 
-    def resetShiftRate(self, shift_rate: float):
+    def resetShiftRate(self, shift_rate: float) -> None:
+        """
+        Never used, set percentage of points to be randomly shifted
+        """
         self.shift_rate = min(1.0, max(0.0, shift_rate))
 
 
     def loadNextFiles(self, load_n: int) -> bool:
         """
         Load next n files into memory
+        Not necessary once the cache is saved
         :return: True if there are still files to load, False if all files are loaded
         """
         # First clear the previous dataset_part
@@ -101,21 +119,6 @@ class XianTrajectoryDataset(data.Dataset):
                     traj = lon_lat_tensor[:self.traj_length].to(torch.float32)
                     traj = ((traj - self.traj_mean[:, 1:]) / self.traj_std[:, 1:]).transpose(0, 1).contiguous()
                     # traj: (2, N) torch.float32
-
-                    # traj_mean = torch.mean(traj, dim=1, keepdim=True)   # (2, 1)
-                    # traj_std = torch.std(traj, dim=1, keepdim=True)     # (2, 1)
-                    # norm_traj = (traj - traj_mean) / traj_std  # (2, N)
-
-                    # segment_lengths = torch.sqrt(torch.sum((norm_traj[:, 1:] - norm_traj[:, :-1]) ** 2, dim=0))
-                    # seg_len_max = torch.max(segment_lengths)
-                    # seg_len_std = torch.std(segment_lengths)
-                    # seg_len_range = torch.max(segment_lengths) - torch.min(segment_lengths)
-
-                    # seg_len_std > 0.13: trajectory very non-uniform
-                    # seg_len_range > 0.3: trajectory very non-uniform
-                    # seg_len_max < 1e-5: trajectory too concentrated like a single point
-                    # if seg_len_std > 0.13 or seg_len_range > 0.3 or seg_len_max < 1e-5:
-                    #     continue
 
                     # minutes since month start
                     times = ((time_tensor[:self.traj_length] - self.time_shift) / 60).to(torch.float32)
@@ -160,7 +163,12 @@ class XianTrajectoryDataset(data.Dataset):
 
 
     def __getGaussianSegments(self, n_segments: int) -> torch.Tensor:
-        # Generate a Gaussian distribution with mean=0 and standard deviation=1
+        """
+        It is used to divide city grids, but in a gaussian way
+        Closer to the center, the grid is finer, further from the center, the grid is coarser
+        :param n_segments: The number of segments
+        :return: The boundaries of the segments
+        """
         mean = 0
         std_dev = 1
         gaussian_dist = stats.norm(mean, std_dev)
@@ -185,12 +193,16 @@ class XianTrajectoryDataset(data.Dataset):
 
 
     def shuffleAllFiles(self):
+        """
+        Never used, shuffle all files
+        :return:
+        """
         if self.part_idx != 0:
             raise RuntimeError('You should call loadNextFiles() to load all files before shuffling')
         random.shuffle(self.file_paths)
 
 
-    def __len__(self):
+    def __len__(self) -> int:
         return len(self.dataset_part)
 
 
@@ -216,7 +228,9 @@ class XianTrajectoryDataset(data.Dataset):
 
     def sampleRateEqualize(self, original_traj: torch.Tensor) -> torch.Tensor:
         """
-        Sample rate equalize a trajectory, to make points have equal distance
+        To make points have equal distance, using linear interpolation.
+        First up sample the trajectory 10x denser with linear interpolation,
+        then use this overly dense trajectory to sample the equalized trajectory
         :param original_traj: the trajectory to be equalized, (3, L)
         :return: the equalized trajectory, (3, L)
         """
@@ -252,10 +266,18 @@ class XianTrajectoryDataset(data.Dataset):
 
 
 
-    def __getitem__(self, index: Any) -> Any:
+    def __getitem__(self, index: int) -> Any:
         """
         :param index: The index of the trajectory in dataset_part
-        :return: lon_lat: (2, N), attr: (3,), times: (N,)
+        :return:
+            traj: the original trajectory, (3, L)
+            eq_traj: the equalized trajectory, (3, L)
+            insertion_mask: insertion_mask[i] = 3 means 3 new points should be generated and inserted to the
+                traj !!After Erase!! between point i and point i+1, shape: (L,)
+            numeric_attr: the numeric attributes, (2,)
+            categorical_attr: the categorical attributes, (4,)
+            binary_mask: binary_mask[i] = 1 if point i in traj should be erased, 0 otherwise, (L,)
+            n_erased: the number of erased points, (1,)
         """
         # lon_lat: (N, 3), times: (N,)
         traj, eq_traj = self.dataset_part[index]
@@ -291,15 +313,14 @@ class XianTrajectoryDataset(data.Dataset):
 
         src_cell_idx = self.getCellIndex(traj[:2, 0])  # (2,)
         dst_cell_idx = self.getCellIndex(traj[:2, -1])  # (2,)
-        categorial_attr = torch.cat([src_cell_idx, dst_cell_idx], dim=0).to(torch.long)  # (5,)
-
+        categorical_attr = torch.cat([src_cell_idx, dst_cell_idx], dim=0).to(torch.long)  # (5,)
 
         # traj: original trajetcory
         # eq_traj: traj with unit sample intervals
         # insertion_mask: [i] = N represents N points should be inserted between i and i+1
         # numeric_attr: [traj_length, avg_move_distance]
         # binary_mask: 1 if the place is erased, 0 if it is remained
-        return traj, eq_traj, insertion_mask, numeric_attr, categorial_attr, binary_mask, n_erased
+        return traj, eq_traj, insertion_mask, numeric_attr, categorical_attr, binary_mask, n_erased
 
 
     @property
